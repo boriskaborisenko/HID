@@ -1,0 +1,87 @@
+import NIO
+import NIOHTTP1
+import NIOWebSocket
+import AppKit
+import Foundation
+
+final class WebSocketHandler: ChannelInboundHandler {
+    typealias InboundIn = WebSocketFrame
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        let frame = unwrapInboundIn(data)
+        guard case .text = frame.opcode else { return }
+
+        var buffer = frame.unmaskedData
+        if let bytes = buffer.getBytes(at: 0, length: buffer.readableBytes),
+           let jsonStr = String(bytes: bytes, encoding: .utf8) {
+            print("📥 Received: \(jsonStr)")
+
+            if let json = try? JSONSerialization.jsonObject(with: Data(jsonStr.utf8)) as? [String: Any],
+               let type = json["type"] as? String {
+
+                switch type {
+                case "mousemove":
+                    if let x = json["x"] as? CGFloat,
+                       let y = json["y"] as? CGFloat {
+                        let loc = CGPoint(x: x, y: y)
+                        let move = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: loc, mouseButton: .left)!
+                        move.post(tap: .cghidEventTap)
+                    }
+
+                case "click":
+                    if let button = json["button"] as? String {
+                        let b: CGMouseButton = (button == "right") ? .right : .left
+                        let type: CGEventType = (b == .right) ? .rightMouseDown : .leftMouseDown
+                        let loc = NSEvent.mouseLocation
+                        let click = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: loc, mouseButton: b)!
+                        click.post(tap: .cghidEventTap)
+                    }
+
+                case "release":
+                    if let button = json["button"] as? String {
+                        let b: CGMouseButton = (button == "right") ? .right : .left
+                        let type: CGEventType = (b == .right) ? .rightMouseUp : .leftMouseUp
+                        let loc = NSEvent.mouseLocation
+                        let release = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: loc, mouseButton: b)!
+                        release.post(tap: .cghidEventTap)
+                    }
+
+                default:
+                    break
+                }
+            }
+        }
+    }
+}
+
+let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+
+let upgrader = NIOWebSocketServerUpgrader(
+    maxFrameSize: 1 << 14,
+    automaticErrorHandling: true,
+    shouldUpgrade: { _, _ in
+        return group.next().makeSucceededFuture([:])
+    },
+    upgradePipelineHandler: { channel, _ in
+        channel.pipeline.addHandler(WebSocketHandler())
+    }
+)
+
+let bootstrap = ServerBootstrap(group: group)
+    .serverChannelOption(ChannelOptions.backlog, value: 256)
+    .childChannelInitializer { channel in
+        channel.pipeline.configureHTTPServerPipeline(
+            withServerUpgrade: (upgraders: [upgrader], completionHandler: { _ in })
+        )
+    }
+    .childChannelOption(ChannelOptions.socket(IPPROTO_TCP, TCP_NODELAY), value: 1)
+
+defer { try? group.syncShutdownGracefully() }
+
+do {
+    let channel = try bootstrap.bind(host: "0.0.0.0", port: 31337).wait()
+    print("🟢 Server running at \(channel.localAddress!)")
+    try channel.closeFuture.wait()
+} catch {
+    print("💥 Server crashed: \(error)")
+}
